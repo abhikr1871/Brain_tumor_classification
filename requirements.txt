@@ -1,0 +1,33 @@
+# Core Scientific Computing
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Classical Image Processing & Computer Vision
+opencv-python>=4.8.0
+scikit-image>=0.21.0
+Pillow>=10.0.0
+
+# Classical Machine Learning Baselines & Evaluation
+scikit-learn>=1.3.0
+
+# Deep Learning Framework
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+timm>=0.9.12
+albumentations>=1.3.1
+
+# Explainable AI (XAI)
+grad-cam>=1.4.8
+
+# Data Visualizations & Logging
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.66.0
+
+# Application & Deployment
+streamlit>=1.30.0
+
+# Dataset Automation & Utilities
+kaggle>=1.5.16
