@@ -249,6 +249,7 @@ def main():
     parser.add_argument("--loss", choices=["cross_entropy", "focal"], default="cross_entropy", help="Loss function for DL training")
     parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training")
+    parser.add_argument("--tta", action="store_true", help="Enable horizontal-flip Test-Time Augmentation during evaluation")
 
     args = parser.parse_args()
 
@@ -298,7 +299,7 @@ def main():
         model = _build_model(args.model, pretrained=False)
         checkpoint = torch.load(weights_path, map_location=DEVICE)
         model.load_state_dict(checkpoint["model_state_dict"])
-        evaluate_model(model, test_loader, device=DEVICE, model_name=args.model)
+        evaluate_model(model, test_loader, device=DEVICE, model_name=args.model, use_tta=args.tta)
 
 if __name__ == "__main__":
     main()

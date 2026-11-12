@@ -15,11 +15,23 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.config import CLASSES
 from src.data.dataset import create_data_splits
 from src.explainability.gradcam import GradCAM, overlay_cam_on_image
-from src.image_processing.enhancement import adjust_gamma, apply_bilateral_filter, apply_clahe
+from src.image_processing.enhancement import (
+    adjust_gamma,
+    apply_bilateral_filter,
+    apply_clahe,
+    apply_homomorphic_filter,
+    extract_edge_map,
+)
 from src.image_processing.feature_extraction import extract_all_classical_features
+from src.image_processing.segmentation import (
+    draw_segmentation_overlay,
+    extract_morphological_features,
+    segment_tumor_region,
+)
 from src.image_processing.skull_stripping import crop_brain_contour
 from src.models.custom_cnn import BrainTumorCNN
 from src.models.transfer_models import build_transfer_model
+from src.training.evaluate import evaluate_model
 from src.training.loss_functions import FocalLoss
 
 
@@ -53,6 +65,32 @@ class TestImageProcessing(unittest.TestCase):
         self.assertEqual(apply_clahe(gray).shape, gray.shape)
         self.assertEqual(apply_bilateral_filter(img).shape, img.shape)
         self.assertEqual(adjust_gamma(img, gamma=1.2).shape, img.shape)
+
+        homo = apply_homomorphic_filter(img, color_space="RGB")
+        self.assertEqual(homo.shape, img.shape)
+        self.assertEqual(homo.dtype, np.uint8)
+
+        for method in ("canny", "sobel"):
+            edges = extract_edge_map(img, method=method, color_space="RGB")
+            self.assertEqual(edges.shape, gray.shape)
+            self.assertEqual(edges.dtype, np.uint8)
+
+    def test_morphological_segmentation_and_shape_features(self):
+        img = _make_synthetic_mri()
+        mask = segment_tumor_region(img, is_rgb=False)
+        self.assertEqual(mask.shape, img.shape[:2])
+        self.assertGreater(int(np.count_nonzero(mask)), 0)
+
+        feats = extract_morphological_features(mask)
+        self.assertGreater(feats["tumor_area_px"], 0.0)
+        self.assertGreater(feats["circularity"], 0.5)
+        self.assertTrue(0.0 <= feats["eccentricity"] <= 1.0)
+
+        overlay = draw_segmentation_overlay(img, mask, is_rgb=True)
+        self.assertEqual(overlay.shape, img.shape)
+
+        empty_feats = extract_morphological_features(np.zeros((64, 64), dtype=np.uint8))
+        self.assertEqual(empty_feats["tumor_area_px"], 0.0)
 
     def test_classical_feature_vector(self):
         img = _make_synthetic_mri()
@@ -99,6 +137,25 @@ class TestModelsAndExplainability(unittest.TestCase):
         loss = loss_fn(logits, targets)
         self.assertEqual(loss.ndim, 0)
         self.assertTrue(torch.isfinite(loss))
+
+    def test_evaluate_model_with_tta(self):
+        model = BrainTumorCNN(num_classes=len(CLASSES))
+        ds = torch.utils.data.TensorDataset(torch.randn(4, 3, 224, 224), torch.tensor([0, 1, 2, 3]))
+        loader = torch.utils.data.DataLoader(ds, batch_size=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            import src.training.evaluate as eval_mod
+            orig_reports, orig_figures = eval_mod.REPORTS_DIR, eval_mod.FIGURES_DIR
+            eval_mod.REPORTS_DIR = Path(tmp)
+            eval_mod.FIGURES_DIR = Path(tmp)
+            try:
+                res = evaluate_model(
+                    model, loader, device=torch.device("cpu"), save_figures=False, model_name="unit", use_tta=True
+                )
+            finally:
+                eval_mod.REPORTS_DIR = orig_reports
+                eval_mod.FIGURES_DIR = orig_figures
+            self.assertEqual(len(res["predictions"]), 4)
+            self.assertTrue((Path(tmp) / "unit_tta_report.json").exists())
 
 
 class TestDatasetSplits(unittest.TestCase):

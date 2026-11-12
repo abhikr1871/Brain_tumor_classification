@@ -32,8 +32,9 @@ Brain_tumor_classification/
 │   ├── explainability/
 │   │   └── gradcam.py             # Hook-based Grad-CAM heatmap generator & overlay visualizer
 │   ├── image_processing/
-│   │   ├── enhancement.py         # LAB CLAHE, Bilateral filtering, Gamma correction
+│   │   ├── enhancement.py         # LAB CLAHE, Homomorphic FFT, Bilateral, Gamma, Canny/Sobel edges
 │   │   ├── feature_extraction.py  # GLCM Haralick features, LBP histogram, intensity moments
+│   │   ├── segmentation.py        # Otsu + morphological tumor segmentation & shape descriptors
 │   │   └── skull_stripping.py     # Gaussian blur, thresholding, morphology & contour crop
 │   ├── models/
 │   │   ├── classical_ml.py        # Scaled SVM (RBF) & Random Forest pipelines
@@ -61,7 +62,8 @@ Brain_tumor_classification/
 | Custom CNN (15 epochs) | Deep Learning (from scratch) | 78.25% | 0.7814 | 0.9353 |
 | SVM (RBF) | Classical ML (GLCM + LBP + Stats) | 83.19% | 0.8268 | — |
 | Random Forest | Classical ML (GLCM + LBP + Stats) | 84.38% | 0.8386 | — |
-| **ResNet18** (15 epochs) | **Transfer Learning (ImageNet)** | **95.69%** | **0.9563** | **0.9899** |
+| ResNet18 (15 epochs) | Transfer Learning (ImageNet) | 95.69% | 0.9563 | 0.9899 |
+| **ResNet18 + TTA** | **Transfer Learning + Flip TTA** | **95.94%** | **0.9588** | **0.9906** |
 
 ---
 
@@ -91,9 +93,9 @@ python run_pipeline.py --mode train-ml
 
 # Deep Learning (custom_cnn | resnet18 | resnet50 | efficientnet_b0 | densenet121)
 python run_pipeline.py --mode train-dl --model resnet18 --epochs 15 --batch-size 16
-python run_pipeline.py --mode evaluate --model resnet18
+python run_pipeline.py --mode evaluate --model resnet18 --tta
 ```
-*(Optional: pass `--loss focal` to train with Focal Loss.)*
+*(Optional: pass `--loss focal` to train with Focal Loss, or omit `--tta` for single-pass evaluation.)*
 
 ### 5. Launch Interactive Streamlit App
 ```bash
@@ -107,7 +109,8 @@ python run_pipeline.py --mode app
 | Topic Domain | Techniques Implemented | File Reference |
 | :--- | :--- | :--- |
 | **Classical Image Processing** | Gaussian Blur, Thresholding, Morphology, Extreme Contours | [`src/image_processing/skull_stripping.py`](src/image_processing/skull_stripping.py) |
-| **Image Enhancement** | LAB-space CLAHE, Bilateral Filtering, Gamma Correction | [`src/image_processing/enhancement.py`](src/image_processing/enhancement.py) |
+| **Image Enhancement & Edges** | LAB CLAHE, Homomorphic FFT, Bilateral, Gamma, Canny/Sobel | [`src/image_processing/enhancement.py`](src/image_processing/enhancement.py) |
+| **Morphological Segmentation** | Otsu + Morphological Masking & 2D Shape Descriptors | [`src/image_processing/segmentation.py`](src/image_processing/segmentation.py) |
 | **Handcrafted Features** | GLCM (Haralick), Local Binary Patterns (LBP), Moments | [`src/image_processing/feature_extraction.py`](src/image_processing/feature_extraction.py) |
 | **Classical ML Baselines** | StandardScaler + SVM (RBF), Random Forest Classifier | [`src/models/classical_ml.py`](src/models/classical_ml.py) |
 | **Deep Learning** | Custom 4-stage CNN, ResNet18/50, EfficientNet-B0, DenseNet121 | [`src/models/custom_cnn.py`](src/models/custom_cnn.py), [`src/models/transfer_models.py`](src/models/transfer_models.py) |

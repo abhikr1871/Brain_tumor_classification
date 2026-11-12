@@ -1,15 +1,20 @@
 """
 Streamlit Web Application: Brain Tumor Classification & Explainability System.
-Allows interactive MRI upload, automated image preprocessing, multi-model inference
-(Deep Learning + Classical ML baselines), visual Grad-CAM interpretability,
-and benchmark report inspection.
+Allows interactive MRI upload, classical IPCV preprocessing (skull-stripping,
+homomorphic filtering, bilateral denoising, gamma, CLAHE, edge extraction),
+morphological tumor segmentation, multi-model inference with TTA, Grad-CAM XAI,
+clinical confidence guardrails, downloadable HTML reports, and benchmark inspection.
 """
 
+import base64
+import html
+import io
 import json
 import pickle
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import cv2
 import numpy as np
@@ -35,11 +40,18 @@ from src.image_processing.enhancement import (
     adjust_gamma,
     apply_bilateral_filter,
     apply_clahe,
+    apply_homomorphic_filter,
+    extract_edge_map,
 )
 from src.image_processing.feature_extraction import (
     extract_all_classical_features,
     extract_glcm_features,
     extract_intensity_statistics,
+)
+from src.image_processing.segmentation import (
+    draw_segmentation_overlay,
+    extract_morphological_features,
+    segment_tumor_region,
 )
 from src.image_processing.skull_stripping import crop_brain_contour
 from src.models.custom_cnn import BrainTumorCNN
@@ -60,6 +72,8 @@ CLASSICAL_PKLS = {
     "Random Forest": CHECKPOINTS_DIR / "random_forest.pkl",
 }
 
+CONFIDENCE_THRESHOLD = 70.0
+
 
 def _checkpoint_exists(model_key: str) -> bool:
     return (CHECKPOINTS_DIR / f"{model_key}_best.pth").exists()
@@ -76,7 +90,7 @@ def _default_model_index() -> int:
 @st.cache_resource
 def load_dl_model(model_key: str, mtime: float) -> torch.nn.Module:
     """Loads and caches a trained PyTorch checkpoint by model key and file mtime."""
-    _ = mtime  # Cache bust when checkpoint file is updated on disk
+    _ = mtime
     factory = next(spec[1] for spec in MODEL_SPECS.values() if spec[0] == model_key)
     model = factory()
     checkpoint = torch.load(CHECKPOINTS_DIR / f"{model_key}_best.pth", map_location=DEVICE)
@@ -115,6 +129,7 @@ def _list_sample_test_images() -> Dict[str, Path]:
 def _preprocess_image(
     rgb_image: np.ndarray,
     enable_crop: bool,
+    enable_homomorphic: bool,
     enable_bilateral: bool,
     gamma_val: float,
     enable_clahe: bool,
@@ -123,6 +138,8 @@ def _preprocess_image(
     processed = rgb_image.copy()
     if enable_crop:
         processed = crop_brain_contour(processed)
+    if enable_homomorphic:
+        processed = apply_homomorphic_filter(processed, color_space="RGB")
     if enable_bilateral:
         processed = apply_bilateral_filter(processed)
     if abs(gamma_val - 1.0) > 1e-3:
@@ -130,6 +147,67 @@ def _preprocess_image(
     if enable_clahe:
         processed = apply_clahe(processed, clip_limit=clahe_clip, color_space="RGB")
     return processed
+
+
+def _encode_png_b64(rgb_or_gray: np.ndarray) -> str:
+    buf = io.BytesIO()
+    Image.fromarray(rgb_or_gray).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _build_html_report(
+    sample_name: str,
+    model_choice: str,
+    use_tta: bool,
+    pred_class: str,
+    confidence: float,
+    probs: np.ndarray,
+    images_rgb: Dict[str, np.ndarray],
+    descriptors: Dict[str, float],
+) -> str:
+    """Builds a self-contained HTML diagnostic report for download."""
+    status_badge = (
+        f"LOW CONFIDENCE (&lt;{CONFIDENCE_THRESHOLD:.0f}%) - REVIEW RECOMMENDED"
+        if confidence < CONFIDENCE_THRESHOLD
+        else "HIGH CONFIDENCE"
+    )
+    img_cards = "".join(
+        f'<div class="card"><h4>{html.escape(title)}</h4>'
+        f'<img src="data:image/png;base64,{_encode_png_b64(arr)}" /></div>'
+        for title, arr in images_rgb.items()
+    )
+    prob_rows = "".join(
+        f"<tr><td>{html.escape(c.capitalize())}</td><td>{p*100:.2f}%</td></tr>"
+        for c, p in zip(CLASSES, probs)
+    )
+    desc_rows = "".join(
+        f"<tr><td>{html.escape(k)}</td><td>{v:.4f}</td></tr>"
+        for k, v in descriptors.items()
+    )
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>MRI Diagnostic Report</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 24px; color: #1f2937; }}
+.grid {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; }}
+.card {{ border: 1px solid #d1d5db; border-radius: 8px; padding: 10px; width: 220px; text-align: center; }}
+.card img {{ max-width: 200px; border-radius: 4px; }}
+table {{ border-collapse: collapse; width: 420px; margin-bottom: 16px; }}
+th, td {{ border: 1px solid #d1d5db; padding: 6px 10px; text-align: left; }}
+th {{ background: #f3f4f6; }}
+.badge {{ display: inline-block; padding: 4px 10px; border-radius: 4px; background: #eef2ff; font-weight: bold; }}
+</style></head><body>
+<h2>Brain Tumor MRI Diagnostic Report</h2>
+<p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} |
+<strong>Sample:</strong> {html.escape(sample_name)} |
+<strong>Model:</strong> {html.escape(model_choice)} (TTA={use_tta})</p>
+<p class="badge">Predicted Class: {html.escape(pred_class.upper())} ({confidence:.2f}%) — {status_badge}</p>
+<div class="grid">{img_cards}</div>
+<h3>Class Probabilities</h3>
+<table><tr><th>Class</th><th>Probability</th></tr>{prob_rows}</table>
+<h3>IPCV Texture &amp; Morphological Descriptors</h3>
+<table><tr><th>Descriptor</th><th>Value</th></tr>{desc_rows}</table>
+<p><em>Academic IPCV diagnostic demonstration only — not a substitute for clinical radiology review.</em></p>
+</body></html>"""
 
 
 def _load_benchmark_rows() -> pd.DataFrame:
@@ -162,7 +240,7 @@ def _load_benchmark_rows() -> pd.DataFrame:
         auc_val = data.get("macro_roc_auc")
         rows.append({
             "Model": data.get("model", report_path.stem.replace("_report", "")),
-            "Family": "Deep Learning",
+            "Family": "Deep Learning (TTA)" if data.get("use_tta") else "Deep Learning",
             "Test Accuracy (%)": round(rep["accuracy"] * 100, 2),
             "Macro Precision": round(macro["precision"], 4),
             "Macro Recall": round(macro["recall"], 4),
@@ -177,12 +255,12 @@ def _load_benchmark_rows() -> pd.DataFrame:
 
 st.title("🧠 Brain Tumor Classification & Explainability System")
 st.markdown(
-    "*Image Processing & Computer Vision Project — Classical Skull-Stripping, CLAHE, "
-    "Handcrafted Texture Features, Deep Transfer Learning & Grad-CAM Saliency Analysis.*"
+    "*Image Processing & Computer Vision Project — Skull-Stripping, Homomorphic FFT Filtering, "
+    "CLAHE, Morphological Segmentation, Texture/Shape Analysis, Transfer Learning & Grad-CAM.*"
 )
 
 # Sidebar settings
-st.sidebar.header("Model & IPCV Configuration")
+st.sidebar.header("Model & Inference")
 model_labels = list(MODEL_SPECS.keys())
 model_choice = st.sidebar.selectbox(
     "Select Model Architecture",
@@ -190,13 +268,18 @@ model_choice = st.sidebar.selectbox(
     index=_default_model_index(),
     format_func=lambda label: f"{label} ({'✅ Ready' if _checkpoint_exists(MODEL_SPECS[label][0]) else 'Not trained'})",
 )
+use_tta = st.sidebar.checkbox("Enable Test-Time Augmentation (TTA)", value=True)
 
-st.sidebar.subheader("Image Processing Pipeline")
+st.sidebar.subheader("Classical IPCV Pipeline")
 enable_crop = st.sidebar.checkbox("Skull-Stripping / Contour Crop", value=True)
+enable_homomorphic = st.sidebar.checkbox("Homomorphic FFT Filter", value=False)
 enable_clahe = st.sidebar.checkbox("CLAHE Contrast Enhancement", value=True)
 clahe_clip = st.sidebar.slider("CLAHE Clip Limit", 1.0, 4.0, 2.0, 0.5, disabled=not enable_clahe)
 enable_bilateral = st.sidebar.checkbox("Bilateral Denoising Filter", value=False)
 gamma_val = st.sidebar.slider("Gamma Adjustment (1.0 = off)", 0.5, 2.0, 1.0, 0.1)
+show_segmentation = st.sidebar.checkbox("Morphological Tumor Segmentation", value=True)
+show_edges = st.sidebar.checkbox("Show Structural Edge Map", value=False)
+edge_method = st.sidebar.selectbox("Edge Operator", ["Canny", "Sobel"], disabled=not show_edges)
 
 st.sidebar.subheader("Input MRI Source")
 sample_map = _list_sample_test_images()
@@ -226,29 +309,44 @@ with tab_diag:
         processed_np = _preprocess_image(
             np_image,
             enable_crop=enable_crop,
+            enable_homomorphic=enable_homomorphic,
             enable_bilateral=enable_bilateral,
             gamma_val=gamma_val,
             enable_clahe=enable_clahe,
             clahe_clip=clahe_clip,
         )
+        processed_resized = cv2.resize(processed_np, IMG_SIZE)
+        resized_bgr = cv2.cvtColor(processed_resized, cv2.COLOR_RGB2BGR)
+
+        seg_mask = segment_tumor_region(processed_resized, is_rgb=True)
+        seg_overlay = draw_segmentation_overlay(processed_resized, seg_mask, is_rgb=True)
+        morph_stats = extract_morphological_features(seg_mask)
+        glcm_stats = extract_glcm_features(resized_bgr)
+        intensity_stats = extract_intensity_statistics(resized_bgr)
+        all_descriptors = {**glcm_stats, **intensity_stats, **morph_stats}
 
         col1, col2, col3 = st.columns(3)
 
         with col1:
             st.subheader("1. Original MRI Scan")
             st.image(pil_image, caption=image_caption or "Input MRI", use_container_width=True)
+            if show_edges:
+                edge_map = extract_edge_map(processed_resized, method=edge_method.lower(), color_space="RGB")
+                st.image(edge_map, caption=f"{edge_method} Edge Map", use_container_width=True)
 
         with col2:
-            st.subheader("2. Preprocessed & Enhanced")
-            st.image(processed_np, caption="Processed Brain ROI", use_container_width=True)
-            resized_bgr = cv2.cvtColor(cv2.resize(processed_np, IMG_SIZE), cv2.COLOR_RGB2BGR)
-            with st.expander("Handcrafted IPCV Texture & Intensity Stats"):
-                glcm_stats = extract_glcm_features(resized_bgr)
-                intensity_stats = extract_intensity_statistics(resized_bgr)
-                combined_stats = {**glcm_stats, **intensity_stats}
+            st.subheader("2. Preprocessed & Segmented")
+            st.image(processed_np, caption="Enhanced Brain ROI", use_container_width=True)
+            if show_segmentation:
+                st.image(
+                    seg_overlay,
+                    caption=f"Morphological Lesion Mask ({morph_stats['tumor_area_px']:.0f} px)",
+                    use_container_width=True,
+                )
+            with st.expander("Texture, Intensity & Shape Descriptors"):
                 st.dataframe(
                     pd.DataFrame(
-                        [{"Descriptor": k, "Value": round(v, 4)} for k, v in combined_stats.items()]
+                        [{"Descriptor": k, "Value": round(v, 4)} for k, v in all_descriptors.items()]
                     ),
                     hide_index=True,
                     use_container_width=True,
@@ -270,18 +368,27 @@ with tab_diag:
                 model = load_dl_model(model_key, checkpoint_path.stat().st_mtime)
 
                 with torch.no_grad():
-                    logits = model(input_tensor)
-                    probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+                    probs_t = torch.softmax(model(input_tensor), dim=1)
+                    if use_tta:
+                        probs_t = 0.5 * (probs_t + torch.softmax(model(torch.flip(input_tensor, dims=[3])), dim=1))
+                    probs = probs_t.squeeze(0).cpu().numpy()
                     pred_idx = int(np.argmax(probs))
                     pred_class = CLASSES[pred_idx]
                     confidence = float(probs[pred_idx] * 100)
 
-                st.success(f"**Predicted Diagnosis ({model_choice}):** `{pred_class.upper()}` ({confidence:.2f}%)")
+                if confidence < CONFIDENCE_THRESHOLD:
+                    st.warning(
+                        f"⚠️ **Uncertain Prediction ({model_choice}):** `{pred_class.upper()}` "
+                        f"({confidence:.2f}% — below {CONFIDENCE_THRESHOLD:.0f}% threshold; clinical review recommended)"
+                    )
+                else:
+                    st.success(f"**Predicted Diagnosis ({model_choice}):** `{pred_class.upper()}` ({confidence:.2f}%)")
 
                 st.write("Class Probabilities:")
                 for c_name, prob in zip(CLASSES, probs):
                     st.progress(float(prob), text=f"{c_name.capitalize()}: {prob*100:.1f}%")
 
+                overlay = processed_resized
                 target_layer = getattr(model, "target_gradcam_layer", None)
                 if target_layer is not None:
                     cam_generator = GradCAM(model, target_layer)
@@ -289,8 +396,31 @@ with tab_diag:
                         heatmap = cam_generator.generate_heatmap(input_tensor, target_class=pred_idx)
                     finally:
                         cam_generator.remove_hooks()
-                    overlay = overlay_cam_on_image(cv2.resize(processed_np, IMG_SIZE), heatmap, is_rgb=True)
+                    overlay = overlay_cam_on_image(processed_resized, heatmap, is_rgb=True)
                     st.image(overlay, caption="Grad-CAM Saliency Map", use_container_width=True)
+
+                report_html = _build_html_report(
+                    sample_name=image_caption or "uploaded_mri",
+                    model_choice=model_choice,
+                    use_tta=use_tta,
+                    pred_class=pred_class,
+                    confidence=confidence,
+                    probs=probs,
+                    images_rgb={
+                        "1. Original MRI": cv2.resize(np_image, IMG_SIZE),
+                        "2. Preprocessed ROI": processed_resized,
+                        "3. Lesion Segmentation": seg_overlay,
+                        "4. Grad-CAM Saliency": overlay,
+                    },
+                    descriptors=all_descriptors,
+                )
+                st.download_button(
+                    "📄 Download Diagnostic Report (HTML)",
+                    data=report_html,
+                    file_name=f"mri_report_{pred_class}.html",
+                    mime="text/html",
+                    use_container_width=True,
+                )
             else:
                 st.info(
                     f"Checkpoint `{checkpoint_path.name}` not found. Train it with:\n\n"
@@ -319,7 +449,7 @@ with tab_bench:
 
     fig_paths = sorted(p for p in FIGURES_DIR.glob("*.png"))
     if fig_paths:
-        st.subheader("Saved Training Curves, Confusion Matrices & ROC Curves")
+        st.subheader("Saved Training Curves, Confusion Matrices, ROC & Error Analysis")
         cols = st.columns(2)
         for idx, fig_path in enumerate(fig_paths):
             with cols[idx % 2]:
