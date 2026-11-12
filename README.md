@@ -62,8 +62,10 @@ Brain_tumor_classification/
 | Custom CNN (15 epochs) | Deep Learning (from scratch) | 78.25% | 0.7814 | 0.9353 |
 | SVM (RBF) | Classical ML (GLCM + LBP + Stats) | 83.19% | 0.8268 | — |
 | Random Forest | Classical ML (GLCM + LBP + Stats) | 84.38% | 0.8386 | — |
+| EfficientNet-B0 (13 ep) | Transfer Learning (ImageNet) | 95.69% | 0.9561 | 0.9941 |
+| EfficientNet-B0 + TTA | Transfer Learning + Flip TTA | 95.81% | 0.9573 | **0.9945** |
 | ResNet18 (15 epochs) | Transfer Learning (ImageNet) | 95.69% | 0.9563 | 0.9899 |
-| **ResNet18 + TTA** | **Transfer Learning + Flip TTA** | **95.94%** | **0.9588** | **0.9906** |
+| **ResNet18 + TTA** | **Transfer Learning + Flip TTA** | **95.94%** | **0.9588** | 0.9906 |
 
 ---
 

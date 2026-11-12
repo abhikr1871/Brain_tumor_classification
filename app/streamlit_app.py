@@ -68,8 +68,8 @@ MODEL_SPECS = {
 }
 
 CLASSICAL_PKLS = {
-    "SVM (RBF)": CHECKPOINTS_DIR / "svm_rbf.pkl",
-    "Random Forest": CHECKPOINTS_DIR / "random_forest.pkl",
+    "Random Forest (Classical ML)": ("Random Forest", CHECKPOINTS_DIR / "random_forest.pkl"),
+    "SVM (RBF) (Classical ML)": ("SVM (RBF)", CHECKPOINTS_DIR / "svm_rbf.pkl"),
 }
 
 CONFIDENCE_THRESHOLD = 70.0
@@ -79,12 +79,18 @@ def _checkpoint_exists(model_key: str) -> bool:
     return (CHECKPOINTS_DIR / f"{model_key}_best.pth").exists()
 
 
-def _default_model_index() -> int:
-    labels = list(MODEL_SPECS.keys())
-    for idx, label in enumerate(labels):
-        if _checkpoint_exists(MODEL_SPECS[label][0]):
-            return idx
-    return 0
+def _is_model_ready(label: str) -> bool:
+    if label in MODEL_SPECS:
+        return _checkpoint_exists(MODEL_SPECS[label][0])
+    return CLASSICAL_PKLS[label][1].exists()
+
+
+def _ordered_model_labels() -> list:
+    """Places all ready/trained models first, keeping ResNet18 first when available."""
+    all_labels = list(MODEL_SPECS.keys()) + list(CLASSICAL_PKLS.keys())
+    ready = [lbl for lbl in all_labels if _is_model_ready(lbl)]
+    untrained = [lbl for lbl in all_labels if not _is_model_ready(lbl)]
+    return ready + untrained
 
 
 @st.cache_resource
@@ -104,10 +110,10 @@ def load_dl_model(model_key: str, mtime: float) -> torch.nn.Module:
 def load_classical_models() -> Dict[str, object]:
     """Loads available scikit-learn classical ML pipelines."""
     loaded = {}
-    for name, path in CLASSICAL_PKLS.items():
+    for _, (short_name, path) in CLASSICAL_PKLS.items():
         if path.exists():
             with open(path, "rb") as f:
-                loaded[name] = pickle.load(f)
+                loaded[short_name] = pickle.load(f)
     return loaded
 
 
@@ -261,14 +267,15 @@ st.markdown(
 
 # Sidebar settings
 st.sidebar.header("Model & Inference")
-model_labels = list(MODEL_SPECS.keys())
+model_labels = _ordered_model_labels()
 model_choice = st.sidebar.selectbox(
     "Select Model Architecture",
     model_labels,
-    index=_default_model_index(),
-    format_func=lambda label: f"{label} ({'✅ Ready' if _checkpoint_exists(MODEL_SPECS[label][0]) else 'Not trained'})",
+    index=0,
+    format_func=lambda label: f"{label} ({'✅ Ready' if _is_model_ready(label) else 'Not trained'})",
 )
-use_tta = st.sidebar.checkbox("Enable Test-Time Augmentation (TTA)", value=True)
+is_classical_choice = model_choice in CLASSICAL_PKLS
+use_tta = st.sidebar.checkbox("Enable Test-Time Augmentation (TTA)", value=True, disabled=is_classical_choice)
 
 st.sidebar.subheader("Classical IPCV Pipeline")
 enable_crop = st.sidebar.checkbox("Skull-Stripping / Contour Crop", value=True)
@@ -354,27 +361,59 @@ with tab_diag:
 
         with col3:
             st.subheader("3. Clinical Inference & XAI")
-            transform = transforms.Compose([
-                transforms.Resize(IMG_SIZE),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
-            input_tensor = transform(Image.fromarray(processed_np)).unsqueeze(0).to(DEVICE)
+            classical_models = load_classical_models()
+            feat_vec = extract_all_classical_features(resized_bgr).reshape(1, -1)
 
-            model_key, _ = MODEL_SPECS[model_choice]
-            checkpoint_path = CHECKPOINTS_DIR / f"{model_key}_best.pth"
+            probs: Optional[np.ndarray] = None
+            overlay = processed_resized
+            effective_tta = use_tta and not is_classical_choice
 
-            if checkpoint_path.exists():
-                model = load_dl_model(model_key, checkpoint_path.stat().st_mtime)
+            if is_classical_choice:
+                short_name, pkl_path = CLASSICAL_PKLS[model_choice]
+                if short_name in classical_models:
+                    probs = classical_models[short_name].predict_proba(feat_vec)[0]
+                else:
+                    st.info(
+                        f"Checkpoint `{pkl_path.name}` not found. Train Classical ML baselines with:\n\n"
+                        "`python run_pipeline.py --mode train-ml`"
+                    )
+            else:
+                transform = transforms.Compose([
+                    transforms.Resize(IMG_SIZE),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ])
+                input_tensor = transform(Image.fromarray(processed_np)).unsqueeze(0).to(DEVICE)
 
-                with torch.no_grad():
-                    probs_t = torch.softmax(model(input_tensor), dim=1)
-                    if use_tta:
-                        probs_t = 0.5 * (probs_t + torch.softmax(model(torch.flip(input_tensor, dims=[3])), dim=1))
-                    probs = probs_t.squeeze(0).cpu().numpy()
-                    pred_idx = int(np.argmax(probs))
-                    pred_class = CLASSES[pred_idx]
-                    confidence = float(probs[pred_idx] * 100)
+                model_key, _ = MODEL_SPECS[model_choice]
+                checkpoint_path = CHECKPOINTS_DIR / f"{model_key}_best.pth"
+
+                if checkpoint_path.exists():
+                    model = load_dl_model(model_key, checkpoint_path.stat().st_mtime)
+                    with torch.no_grad():
+                        probs_t = torch.softmax(model(input_tensor), dim=1)
+                        if effective_tta:
+                            probs_t = 0.5 * (probs_t + torch.softmax(model(torch.flip(input_tensor, dims=[3])), dim=1))
+                        probs = probs_t.squeeze(0).cpu().numpy()
+
+                    target_layer = getattr(model, "target_gradcam_layer", None)
+                    if target_layer is not None:
+                        cam_generator = GradCAM(model, target_layer)
+                        try:
+                            heatmap = cam_generator.generate_heatmap(input_tensor, target_class=int(np.argmax(probs)))
+                        finally:
+                            cam_generator.remove_hooks()
+                        overlay = overlay_cam_on_image(processed_resized, heatmap, is_rgb=True)
+                else:
+                    st.info(
+                        f"Checkpoint `{checkpoint_path.name}` not found. Train it with:\n\n"
+                        f"`python run_pipeline.py --mode train-dl --model {model_key}`"
+                    )
+
+            if probs is not None:
+                pred_idx = int(np.argmax(probs))
+                pred_class = CLASSES[pred_idx]
+                confidence = float(probs[pred_idx] * 100)
 
                 if confidence < CONFIDENCE_THRESHOLD:
                     st.warning(
@@ -388,30 +427,30 @@ with tab_diag:
                 for c_name, prob in zip(CLASSES, probs):
                     st.progress(float(prob), text=f"{c_name.capitalize()}: {prob*100:.1f}%")
 
-                overlay = processed_resized
-                target_layer = getattr(model, "target_gradcam_layer", None)
-                if target_layer is not None:
-                    cam_generator = GradCAM(model, target_layer)
-                    try:
-                        heatmap = cam_generator.generate_heatmap(input_tensor, target_class=pred_idx)
-                    finally:
-                        cam_generator.remove_hooks()
-                    overlay = overlay_cam_on_image(processed_resized, heatmap, is_rgb=True)
+                if is_classical_choice:
+                    st.caption("Grad-CAM applies to CNN architectures; morphological lesion mask is shown in Column 2.")
+                    report_visuals = {
+                        "1. Original MRI": cv2.resize(np_image, IMG_SIZE),
+                        "2. Preprocessed ROI": processed_resized,
+                        "3. Lesion Segmentation": seg_overlay,
+                    }
+                else:
                     st.image(overlay, caption="Grad-CAM Saliency Map", use_container_width=True)
-
-                report_html = _build_html_report(
-                    sample_name=image_caption or "uploaded_mri",
-                    model_choice=model_choice,
-                    use_tta=use_tta,
-                    pred_class=pred_class,
-                    confidence=confidence,
-                    probs=probs,
-                    images_rgb={
+                    report_visuals = {
                         "1. Original MRI": cv2.resize(np_image, IMG_SIZE),
                         "2. Preprocessed ROI": processed_resized,
                         "3. Lesion Segmentation": seg_overlay,
                         "4. Grad-CAM Saliency": overlay,
-                    },
+                    }
+
+                report_html = _build_html_report(
+                    sample_name=image_caption or "uploaded_mri",
+                    model_choice=model_choice,
+                    use_tta=effective_tta,
+                    pred_class=pred_class,
+                    confidence=confidence,
+                    probs=probs,
+                    images_rgb=report_visuals,
                     descriptors=all_descriptors,
                 )
                 st.download_button(
@@ -421,16 +460,9 @@ with tab_diag:
                     mime="text/html",
                     use_container_width=True,
                 )
-            else:
-                st.info(
-                    f"Checkpoint `{checkpoint_path.name}` not found. Train it with:\n\n"
-                    f"`python run_pipeline.py --mode train-dl --model {model_key}`"
-                )
 
-            classical_models = load_classical_models()
-            if classical_models:
+            if not is_classical_choice and classical_models:
                 with st.expander("Classical ML Baseline Comparison (SVM & RF)"):
-                    feat_vec = extract_all_classical_features(resized_bgr).reshape(1, -1)
                     for ml_name, clf in classical_models.items():
                         ml_probs = clf.predict_proba(feat_vec)[0]
                         ml_idx = int(np.argmax(ml_probs))
