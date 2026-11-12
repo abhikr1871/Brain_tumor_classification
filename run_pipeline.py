@@ -12,10 +12,12 @@ Usage:
 """
 
 import argparse
+import json
+import pickle
 import sys
-import os
 import subprocess
 from pathlib import Path
+from typing import List, Tuple
 
 # Ensure UTF-8 output encoding for Windows terminals
 if sys.platform == "win32":
@@ -28,8 +30,21 @@ if sys.platform == "win32":
 import numpy as np
 import cv2
 import torch
+from tqdm import tqdm
 
-from src.config import PROJECT_ROOT, DATA_RAW, DATA_PROCESSED, CLASSES, IMG_SIZE, CHECKPOINTS_DIR, DEVICE
+from src.config import (
+    PROJECT_ROOT,
+    DATA_RAW,
+    DATA_PROCESSED,
+    CLASSES,
+    IMG_SIZE,
+    CLAHE_CLIP_LIMIT,
+    CLAHE_GRID_SIZE,
+    CHECKPOINTS_DIR,
+    FIGURES_DIR,
+    REPORTS_DIR,
+    DEVICE,
+)
 from src.image_processing.skull_stripping import crop_brain_contour
 from src.image_processing.enhancement import apply_clahe
 from src.image_processing.feature_extraction import extract_all_classical_features
@@ -98,9 +113,12 @@ def run_sanity_test():
 
     # Step 5: Explainable AI (Grad-CAM)
     print("\n[5/5] Testing Explainable AI (Grad-CAM Saliency Map)...")
-    target_layer = model.features[-1].block[0]  # Last conv block
+    target_layer = model.target_gradcam_layer
     gradcam = GradCAM(model, target_layer)
-    cam = gradcam.generate_heatmap(input_tensor, target_class=0)
+    try:
+        cam = gradcam.generate_heatmap(input_tensor, target_class=0)
+    finally:
+        gradcam.remove_hooks()
     overlay = overlay_cam_on_image(resized, cam)
     cv2.imwrite(str(test_dir / "03_gradcam_overlay.png"), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
     print(f"      --> Generated Grad-CAM heatmap overlay: SUCCESS")
@@ -110,6 +128,110 @@ def run_sanity_test():
     print("[+] ALL PIPELINE MODULES VERIFIED & OPERATIONAL!")
     print("=" * 65)
 
+
+def _preprocess_bgr_image(image: np.ndarray) -> np.ndarray:
+    """Applies brain contour cropping, LAB CLAHE enhancement, and resizing."""
+    cropped = crop_brain_contour(image)
+    enhanced = apply_clahe(
+        cropped,
+        clip_limit=CLAHE_CLIP_LIMIT,
+        tile_grid_size=CLAHE_GRID_SIZE,
+        color_space="BGR",
+    )
+    return cv2.resize(enhanced, IMG_SIZE, interpolation=cv2.INTER_AREA)
+
+
+def _build_model(model_name: str, pretrained: bool) -> torch.nn.Module:
+    """Instantiates the requested neural network architecture."""
+    if model_name == "custom_cnn":
+        return BrainTumorCNN(num_classes=len(CLASSES))
+    return build_transfer_model(model_name, num_classes=len(CLASSES), pretrained=pretrained)
+
+
+def run_preprocessing() -> None:
+    """Preprocesses all raw MRI images into data/processed/ and generates split CSVs."""
+    from src.data.dataset import load_dataset_paths, create_data_splits
+
+    raw_paths, _ = load_dataset_paths(DATA_RAW)
+    if not raw_paths:
+        raise FileNotFoundError(f"No images found under {DATA_RAW}. Download the dataset first.")
+
+    print(f"[*] Preprocessing {len(raw_paths)} MRI scans from {DATA_RAW} -> {DATA_PROCESSED}...")
+    saved, skipped = 0, 0
+    for src_path in tqdm(raw_paths, desc="Preprocessing MRIs"):
+        img = cv2.imread(str(src_path))
+        if img is None:
+            skipped += 1
+            continue
+        processed = _preprocess_bgr_image(img)
+        dst_path = (DATA_PROCESSED / src_path.relative_to(DATA_RAW)).with_suffix(".png")
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(dst_path), processed)
+        saved += 1
+
+    (train_split, _), (val_split, _), (test_split, _) = create_data_splits(root_dir=DATA_PROCESSED)
+    print(f"[+] Preprocessed {saved} images ({skipped} skipped) into {DATA_PROCESSED}")
+    print(f"[+] Split counts -> Train: {len(train_split)}, Val: {len(val_split)}, Test: {len(test_split)}")
+
+
+def _extract_features_for_paths(paths: List[Path], apply_preprocessing: bool, desc: str) -> np.ndarray:
+    """Extracts 1D handcrafted feature vectors for a list of MRI image paths."""
+    features = []
+    for img_path in tqdm(paths, desc=desc):
+        img = cv2.imread(str(img_path))
+        if img is None:
+            raise ValueError(f"Could not read image: {img_path}")
+        if apply_preprocessing:
+            img = _preprocess_bgr_image(img)
+        features.append(extract_all_classical_features(img))
+    return np.vstack(features)
+
+
+def run_classical_ml() -> None:
+    """Trains and evaluates SVM (RBF) and Random Forest baselines on handcrafted features."""
+    from src.data.dataset import resolve_dataset_root, create_data_splits
+    from src.models.classical_ml import train_and_eval_classical
+    from src.training.evaluate import save_confusion_matrix_plot
+
+    root_dir, is_preprocessed = resolve_dataset_root()
+    print(f"[*] Loading dataset splits from {root_dir} (preprocessed={is_preprocessed})...")
+    (train_paths, train_labels), (val_paths, val_labels), (test_paths, test_labels) = create_data_splits(
+        root_dir=root_dir
+    )
+
+    fit_paths = train_paths + val_paths
+    fit_labels = np.array(train_labels + val_labels)
+    y_test = np.array(test_labels)
+
+    X_train = _extract_features_for_paths(
+        fit_paths, apply_preprocessing=not is_preprocessed, desc="Extracting train features"
+    )
+    X_test = _extract_features_for_paths(
+        test_paths, apply_preprocessing=not is_preprocessed, desc="Extracting test features"
+    )
+
+    results = train_and_eval_classical(X_train, fit_labels, X_test, y_test, class_names=CLASSES)
+
+    summary = {}
+    for name, res in results.items():
+        slug = name.lower().replace(" ", "_").replace("(", "").replace(")", "")
+        ckpt_path = CHECKPOINTS_DIR / f"{slug}.pkl"
+        with open(ckpt_path, "wb") as f:
+            pickle.dump(res["model"], f)
+        save_confusion_matrix_plot(
+            res["confusion_matrix"],
+            FIGURES_DIR / f"{slug}_confusion_matrix.png",
+            title=f"{name} Confusion Matrix",
+        )
+        summary[name] = {"accuracy": res["accuracy"], "classification_report": res["report"]}
+        print(f"[+] Saved {name} model -> {ckpt_path}")
+
+    report_path = REPORTS_DIR / "classical_ml_report.json"
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"[+] Classical ML comparison report saved to {report_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Brain Tumor Classification Pipeline Orchestrator")
     parser.add_argument(
@@ -118,7 +240,13 @@ def main():
         default="test",
         help="Pipeline phase to execute"
     )
-    parser.add_argument("--model", choices=["custom_cnn", "resnet50", "densenet121"], default="resnet50", help="Architecture for DL training")
+    parser.add_argument(
+        "--model",
+        choices=["custom_cnn", "resnet18", "resnet50", "efficientnet_b0", "densenet121"],
+        default="resnet50",
+        help="Architecture for DL training",
+    )
+    parser.add_argument("--loss", choices=["cross_entropy", "focal"], default="cross_entropy", help="Loss function for DL training")
     parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training")
 
@@ -127,43 +255,50 @@ def main():
     if args.mode == "test":
         run_sanity_test()
 
+    elif args.mode == "preprocess":
+        run_preprocessing()
+
+    elif args.mode == "train-ml":
+        run_classical_ml()
+
     elif args.mode == "app":
         print("[*] Launching Streamlit Web Application...")
-        subprocess.run(["streamlit", "run", "app/streamlit_app.py"])
+        subprocess.run([sys.executable, "-m", "streamlit", "run", "app/streamlit_app.py"])
 
     elif args.mode == "train-dl":
-        from src.data.dataset import get_dataloaders
+        from src.data.dataset import get_dataloaders, resolve_dataset_root
         from src.training.train import run_training
 
-        print(f"[*] Preparing DataLoaders from {DATA_RAW}...")
-        train_loader, val_loader, test_loader = get_dataloaders(root_dir=DATA_RAW, batch_size=args.batch_size)
+        root_dir, is_preprocessed = resolve_dataset_root()
+        print(f"[*] Preparing DataLoaders from {root_dir} (preprocessed={is_preprocessed})...")
+        train_loader, val_loader, _ = get_dataloaders(root_dir=root_dir, batch_size=args.batch_size)
 
         print(f"[*] Initializing model architecture: {args.model}...")
-        if args.model == "custom_cnn":
-            model = BrainTumorCNN(num_classes=len(CLASSES))
-        else:
-            model = build_transfer_model(args.model, num_classes=len(CLASSES), pretrained=True)
-
-        run_training(model, train_loader, val_loader, model_name=args.model, num_epochs=args.epochs)
+        model = _build_model(args.model, pretrained=True)
+        run_training(
+            model,
+            train_loader,
+            val_loader,
+            model_name=args.model,
+            num_epochs=args.epochs,
+            loss_name=args.loss,
+        )
 
     elif args.mode == "evaluate":
-        from src.data.dataset import get_dataloaders
+        from src.data.dataset import get_dataloaders, resolve_dataset_root
         from src.training.evaluate import evaluate_model
 
-        _, _, test_loader = get_dataloaders(root_dir=DATA_RAW, batch_size=args.batch_size)
+        root_dir, _ = resolve_dataset_root()
+        _, _, test_loader = get_dataloaders(root_dir=root_dir, batch_size=args.batch_size)
         weights_path = CHECKPOINTS_DIR / f"{args.model}_best.pth"
         if not weights_path.exists():
             print(f"[!] Checkpoint not found at {weights_path}. Train the model first using --mode train-dl.")
             return
 
-        if args.model == "custom_cnn":
-            model = BrainTumorCNN(num_classes=len(CLASSES))
-        else:
-            model = build_transfer_model(args.model, num_classes=len(CLASSES), pretrained=False)
-
+        model = _build_model(args.model, pretrained=False)
         checkpoint = torch.load(weights_path, map_location=DEVICE)
         model.load_state_dict(checkpoint["model_state_dict"])
-        evaluate_model(model, test_loader, device=DEVICE)
+        evaluate_model(model, test_loader, device=DEVICE, model_name=args.model)
 
 if __name__ == "__main__":
     main()

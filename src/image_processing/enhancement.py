@@ -9,7 +9,12 @@ Includes:
 import cv2
 import numpy as np
 
-def apply_clahe(image: np.ndarray, clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)) -> np.ndarray:
+def apply_clahe(
+    image: np.ndarray,
+    clip_limit: float = 2.0,
+    tile_grid_size: tuple = (8, 8),
+    color_space: str = "BGR",
+) -> np.ndarray:
     """
     Applies Contrast Limited Adaptive Histogram Equalization (CLAHE).
     Increases local contrast in MRI scans without amplifying background noise.
@@ -17,11 +22,14 @@ def apply_clahe(image: np.ndarray, clip_limit: float = 2.0, tile_grid_size: tupl
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
     if len(image.shape) == 3:
         # Convert to LAB color space, apply CLAHE to L-channel, and merge back
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        is_rgb = color_space.upper() == "RGB"
+        to_lab = cv2.COLOR_RGB2LAB if is_rgb else cv2.COLOR_BGR2LAB
+        from_lab = cv2.COLOR_LAB2RGB if is_rgb else cv2.COLOR_LAB2BGR
+        lab = cv2.cvtColor(image, to_lab)
         l, a, b = cv2.split(lab)
         l_clahe = clahe.apply(l)
         enhanced_lab = cv2.merge((l_clahe, a, b))
-        return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+        return cv2.cvtColor(enhanced_lab, from_lab)
     else:
         return clahe.apply(image)
 

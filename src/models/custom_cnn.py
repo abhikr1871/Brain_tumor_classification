@@ -50,6 +50,9 @@ class BrainTumorCNN(nn.Module):
             nn.Linear(128, num_classes)
         )
 
+        # Target final convolutional layer for Grad-CAM saliency maps
+        self.target_gradcam_layer = self.features[-1].block[3]
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
         x = self.gap(x)

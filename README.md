@@ -1,51 +1,67 @@
 # 🧠 Brain Tumor Classification from MRI Images
 ### *Image Processing & Computer Vision Semester Project*
 
-An end-to-end framework combining **Classical Image Processing** (skull stripping, contour extraction, CLAHE, GLCM texture analysis) and **Modern Deep Learning / Transfer Learning** (Custom CNN, ResNet50, DenseNet121) with **Explainable AI (Grad-CAM)** and an interactive **Streamlit Diagnostic Web App**.
+An end-to-end framework combining **Classical Image Processing** (skull stripping / extreme contour extraction, CLAHE, bilateral filtering, gamma adjustment, GLCM Haralick & LBP texture analysis), **Classical Machine Learning** (SVM RBF, Random Forest), and **Deep Learning / Transfer Learning** (Custom 4-Stage CNN, ResNet18, ResNet50, DenseNet121, EfficientNet-B0) with **Explainable AI (Grad-CAM)** and an interactive **Streamlit Diagnostic Web App**.
 
 ---
 
 ## 📁 Project Structure
 
 ```text
-Brain-tumor-classification/
+Brain_tumor_classification/
 ├── app/
-│   └── streamlit_app.py           # Interactive web UI (Inference + Preprocessing + Grad-CAM)
+│   └── streamlit_app.py           # Interactive web UI (Inference + Preprocessing + Grad-CAM + Benchmarks)
 ├── data/
-│   ├── raw/                       # Original MRI datasets (glioma, meningioma, notumor, pituitary)
-│   ├── processed/                 # Cropped, skull-stripped, and contrast-enhanced images
-│   ├── augmented/                 # Offline augmented samples
-│   └── splits/                    # Train/Val/Test CSV split metadata
-├── models_checkpoints/            # Saved PyTorch (.pth) model weights
-├── notebooks/                     # Exploratory analysis & experiments
+│   ├── raw/                       # Original MRI dataset (Training/ & Testing/ across 4 classes)
+│   ├── processed/                 # Preprocessed (contour-cropped, CLAHE, 224x224) PNG images
+│   ├── augmented/                 # Optional offline augmented samples
+│   └── splits/                    # Reproducible train.csv, val.csv, test.csv metadata
+├── models_checkpoints/            # Saved PyTorch (.pth) & Scikit-Learn (.pkl) model weights
+├── notebooks/
+│   └── 01_project_walkthrough.ipynb # End-to-end visualization, Grad-CAM & benchmark notebook
 ├── outputs/
-│   ├── figures/                   # Confusion matrices, ROC curves, Grad-CAM overlays
-│   ├── logs/                      # Training loss/accuracy logs
-│   └── reports/                   # Quantitative metrics & evaluation reports
+│   ├── figures/                   # Training curves, confusion matrices, ROC curves
+│   ├── logs/                      # Per-epoch training history JSON logs
+│   └── reports/                   # Quantitative test evaluation JSON reports
 ├── src/
-│   ├── config.py                  # Global configurations, paths, hyperparams, device
+│   ├── config.py                  # Global paths, classes, hyperparameters, device management
 │   ├── data/
-│   │   ├── dataset.py             # PyTorch Dataset and DataLoader builders
+│   │   ├── dataset.py             # PyTorch Dataset, DataLoaders, and stratified split builder
 │   │   ├── download.py            # Kaggle API automated downloader
-│   │   └── transforms.py          # Data augmentation & image preprocessing transforms
+│   │   └── transforms.py          # Preprocessing & stochastic augmentation transforms
 │   ├── explainability/
-│   │   └── gradcam.py             # Grad-CAM heatmap generator & overlay visualizer
+│   │   └── gradcam.py             # Hook-based Grad-CAM heatmap generator & overlay visualizer
 │   ├── image_processing/
-│   │   ├── enhancement.py         # CLAHE, Bilateral filtering, Gamma adjustment
-│   │   ├── feature_extraction.py  # GLCM Haralick features, LBP, statistical moments
-│   │   └── skull_stripping.py     # Otsu thresholding, contour finding, extreme point crop
+│   │   ├── enhancement.py         # LAB CLAHE, Bilateral filtering, Gamma correction
+│   │   ├── feature_extraction.py  # GLCM Haralick features, LBP histogram, intensity moments
+│   │   └── skull_stripping.py     # Gaussian blur, thresholding, morphology & contour crop
 │   ├── models/
-│   │   ├── classical_ml.py        # SVM (RBF) & Random Forest on handcrafted features
-│   │   ├── custom_cnn.py          # Custom 4-stage convolutional neural network
-│   │   └── transfer_models.py     # Pretrained ResNet50, EfficientNet, DenseNet121
-│   ├── training/
-│   │   ├── evaluate.py            # Metrics: Confusion matrix, Precision, Recall, F1
-│   │   ├── loss_functions.py      # Cross-Entropy & Focal Loss
-│   │   └── train.py               # AMP training loop, early stopping, scheduler
-│   └── utils/                     # Helper routines, logging, visualization utilities
-├── requirements.txt               # Complete Python dependencies
-└── .gitignore                     # Git hygiene for data and large model weights
+│   │   ├── classical_ml.py        # Scaled SVM (RBF) & Random Forest pipelines
+│   │   ├── custom_cnn.py          # Custom 4-stage CNN with BatchNorm & Dropout
+│   │   └── transfer_models.py     # Pretrained ResNet18/50, EfficientNet-B0, DenseNet121
+│   └── training/
+│       ├── evaluate.py            # Classification report, confusion matrix, OvR ROC-AUC & curves
+│       ├── loss_functions.py      # Cross-Entropy & Focal Loss
+│       └── train.py               # Training loop, AMP, ReduceLROnPlateau, early stopping
+├── tests/
+│   └── test_pipeline.py           # Unit tests across IPCV, models, Grad-CAM, and splits
+├── run_pipeline.py                # Unified CLI orchestrator for all pipeline stages
+└── requirements.txt               # Python dependencies
 ```
+
+---
+
+## 📊 Dataset & Experimental Results
+
+* **Dataset:** [Masoud Nickparvar Brain Tumor MRI Dataset](https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset) (v2 — **7,200** scans across `glioma`, `meningioma`, `notumor`, `pituitary`, 1,800 images per class)
+* **Splits:** `4,760` Train / `840` Val (85/15 stratified split of `Training/`) and `1,600` held-out Test (`Testing/`)
+
+| Model | Approach | Test Accuracy | Macro F1 | Macro ROC-AUC |
+| :--- | :--- | :---: | :---: | :---: |
+| Custom CNN (15 epochs) | Deep Learning (from scratch) | 78.25% | 0.7814 | 0.9353 |
+| SVM (RBF) | Classical ML (GLCM + LBP + Stats) | 83.19% | 0.8268 | — |
+| Random Forest | Classical ML (GLCM + LBP + Stats) | 84.38% | 0.8386 | — |
+| **ResNet18** (15 epochs) | **Transfer Learning (ImageNet)** | **95.69%** | **0.9563** | **0.9899** |
 
 ---
 
@@ -56,16 +72,32 @@ Brain-tumor-classification/
 pip install -r requirements.txt
 ```
 
-### 2. Download Dataset
-You can download the recommended 4-class dataset (Masoud Nickparvar / Sartaj Bhuvaji) automatically via Kaggle API:
+### 2. Run Sanity Check & Unit Tests
 ```bash
-python src/data/download.py
+python run_pipeline.py --mode test
+python -m unittest discover -s tests -v
 ```
-*Or manually download from Kaggle (`masoudnickparvar/brain-tumor-mri-dataset`) and unzip into `data/raw/`.*
 
-### 3. Launch Interactive Streamlit App
+### 3. Download & Preprocess Dataset
+Download via Kaggle API (`python src/data/download.py`) or `kagglehub` into `data/raw/`, then run preprocessing once:
 ```bash
-streamlit run app/streamlit_app.py
+python run_pipeline.py --mode preprocess
+```
+
+### 4. Train & Evaluate Models
+```bash
+# Classical ML baselines (SVM & Random Forest)
+python run_pipeline.py --mode train-ml
+
+# Deep Learning (custom_cnn | resnet18 | resnet50 | efficientnet_b0 | densenet121)
+python run_pipeline.py --mode train-dl --model resnet18 --epochs 15 --batch-size 16
+python run_pipeline.py --mode evaluate --model resnet18
+```
+*(Optional: pass `--loss focal` to train with Focal Loss.)*
+
+### 5. Launch Interactive Streamlit App
+```bash
+python run_pipeline.py --mode app
 ```
 
 ---
@@ -74,11 +106,11 @@ streamlit run app/streamlit_app.py
 
 | Topic Domain | Techniques Implemented | File Reference |
 | :--- | :--- | :--- |
-| **Classical Image Processing** | Otsu Thresholding, Morphological Ops, Extreme Contours | [`src/image_processing/skull_stripping.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/image_processing/skull_stripping.py) |
-| **Image Enhancement** | CLAHE, Bilateral Filtering, Gamma Correction | [`src/image_processing/enhancement.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/image_processing/enhancement.py) |
-| **Handcrafted Features** | GLCM (Haralick), Local Binary Patterns (LBP) | [`src/image_processing/feature_extraction.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/image_processing/feature_extraction.py) |
-| **Classical ML Baselines** | SVM (RBF), Random Forest Classifier | [`src/models/classical_ml.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/models/classical_ml.py) |
-| **Deep Learning** | Custom 4-stage CNN, ResNet50, DenseNet121 | [`src/models/custom_cnn.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/models/custom_cnn.py), [`src/models/transfer_models.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/models/transfer_models.py) |
-| **Loss & Regularization** | Focal Loss, Mixed Precision (AMP), Early Stopping | [`src/training/loss_functions.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/training/loss_functions.py), [`src/training/train.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/training/train.py) |
-| **Explainable AI (XAI)** | Grad-CAM Saliency Maps & Overlay Heatmaps | [`src/explainability/gradcam.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/src/explainability/gradcam.py) |
-| **Web Deployment** | Streamlit Interactive Diagnostic Application | [`app/streamlit_app.py`](file:///c:/Users/abhij/OneDrive/Desktop/Brain-tumor-%20classification/app/streamlit_app.py) |
+| **Classical Image Processing** | Gaussian Blur, Thresholding, Morphology, Extreme Contours | [`src/image_processing/skull_stripping.py`](src/image_processing/skull_stripping.py) |
+| **Image Enhancement** | LAB-space CLAHE, Bilateral Filtering, Gamma Correction | [`src/image_processing/enhancement.py`](src/image_processing/enhancement.py) |
+| **Handcrafted Features** | GLCM (Haralick), Local Binary Patterns (LBP), Moments | [`src/image_processing/feature_extraction.py`](src/image_processing/feature_extraction.py) |
+| **Classical ML Baselines** | StandardScaler + SVM (RBF), Random Forest Classifier | [`src/models/classical_ml.py`](src/models/classical_ml.py) |
+| **Deep Learning** | Custom 4-stage CNN, ResNet18/50, EfficientNet-B0, DenseNet121 | [`src/models/custom_cnn.py`](src/models/custom_cnn.py), [`src/models/transfer_models.py`](src/models/transfer_models.py) |
+| **Loss & Regularization** | Cross-Entropy, Focal Loss, AMP, ReduceLROnPlateau, Early Stopping | [`src/training/loss_functions.py`](src/training/loss_functions.py), [`src/training/train.py`](src/training/train.py) |
+| **Explainable AI (XAI)** | Hook-based Grad-CAM Saliency Maps & Overlays | [`src/explainability/gradcam.py`](src/explainability/gradcam.py) |
+| **Web Deployment** | Interactive Streamlit Diagnostic & Benchmark Dashboard | [`app/streamlit_app.py`](app/streamlit_app.py) |

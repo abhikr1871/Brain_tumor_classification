@@ -26,7 +26,7 @@ class CLAHETransform:
 
     def __call__(self, img: Image.Image) -> Image.Image:
         np_img = np.array(img)
-        enhanced = apply_clahe(np_img, clip_limit=self.clip_limit)
+        enhanced = apply_clahe(np_img, clip_limit=self.clip_limit, color_space="RGB")
         return Image.fromarray(enhanced)
 
 def get_train_transforms(img_size: tuple = (224, 224), apply_preprocessing: bool = True) -> transforms.Compose:
